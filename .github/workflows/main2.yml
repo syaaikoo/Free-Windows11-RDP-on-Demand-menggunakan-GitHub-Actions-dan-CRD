@@ -1,4 +1,4 @@
-name: CRD on GitHub Runner (VirtualBox & Performance Boost)
+name: No install Debian iso
 
 on:
   workflow_dispatch:
