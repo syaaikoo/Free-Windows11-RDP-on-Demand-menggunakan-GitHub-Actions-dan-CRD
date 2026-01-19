@@ -1,0 +1,143 @@
+name: No Install Debian ISO (Optimized)
+
+on:
+  workflow_dispatch:
+    inputs:
+      crd_full_command:
+        description: 'Paste FULL CRD Headless command (CMD / PowerShell)'
+        required: true
+
+jobs:
+  build:
+    runs-on: windows-11-arm
+    timeout-minutes: 10080
+
+    env:
+      INSTALLER_CACHE_PATH: C:\cached-installers
+      WORKSPACE_PATH: C:\Workspace
+      CRD_PIN: ${{ secrets.CRD_PIN || '123456' }}
+
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - name: 📦 Checkout
+        uses: actions/checkout@v4
+
+      # -------------------- CACHE --------------------
+      - name: ♻️ Cache Installers
+        uses: actions/cache@v4
+        with:
+          path: C:\cached-installers
+          key: windows-arm-installers-v1
+
+      # -------------------- PREP --------------------
+      - name: 🧱 Prepare Workspace
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = "Stop"
+
+          New-Item -ItemType Directory -Path $env:WORKSPACE_PATH -Force | Out-Null
+          New-Item -ItemType Directory -Path $env:INSTALLER_CACHE_PATH -Force | Out-Null
+
+      # -------------------- DOWNLOAD --------------------
+      - name: ⬇️ Download Installers (Retry-Safe)
+        run: |
+          function Download-WithRetry($url, $out, $retry = 3) {
+            for ($i=1; $i -le $retry; $i++) {
+              try {
+                Invoke-WebRequest $url -OutFile $out -UseBasicParsing
+                return
+              } catch {
+                if ($i -eq $retry) { throw }
+                Start-Sleep -Seconds (5 * $i)
+              }
+            }
+          }
+
+          $vbox = Join-Path $env:INSTALLER_CACHE_PATH "virtualbox.exe"
+          $crd  = Join-Path $env:INSTALLER_CACHE_PATH "crd.msi"
+
+          if (-not (Test-Path $vbox)) {
+            Download-WithRetry `
+              "https://download.virtualbox.org/virtualbox/7.0.18/VirtualBox-7.0.18-162988-Win.exe" `
+              $vbox
+          }
+
+          if (-not (Test-Path $crd)) {
+            Download-WithRetry `
+              "https://dl.google.com/edgedl/chrome-remote-desktop/chromeremotedesktophost.msi" `
+              $crd
+          }
+
+      # -------------------- INSTALL --------------------
+      - name: 🧩 Install VirtualBox & CRD
+        run: |
+          Start-Process $env:INSTALLER_CACHE_PATH\virtualbox.exe `
+            -ArgumentList "--silent --ignore-reboot" -Wait
+
+          Start-Process msiexec.exe `
+            -ArgumentList "/i `"$env:INSTALLER_CACHE_PATH\crd.msi`" /qn /norestart" -Wait
+
+          Start-Sleep -Seconds 10
+
+      # -------------------- SYSTEM TWEAK --------------------
+      - name: ⚡ Performance Optimizations
+        run: |
+          powercfg /s SCHEME_MIN
+          Set-ItemProperty `
+            'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects' `
+            VisualFxSetting 2 -ErrorAction SilentlyContinue
+
+          "wuauserv","WSearch" | ForEach-Object {
+            Get-Service $_ -ErrorAction SilentlyContinue | ForEach-Object {
+              Stop-Service $_ -Force -ErrorAction SilentlyContinue
+              Set-Service $_ -StartupType Disabled
+            }
+          }
+
+      # -------------------- CRD START --------------------
+      - name: 🌐 Start Chrome Remote Desktop
+        run: |
+          $cmd = '${{ github.event.inputs.crd_full_command }}'
+
+          if ($cmd -notmatch '\s(--code.+)') {
+            throw "CRD arguments not found"
+          }
+
+          $args = "$($Matches[1]) -pin=`"$env:CRD_PIN`""
+
+          $exe = "C:\Program Files\Google\Chrome Remote Desktop\remoting_start_host.exe"
+          if (-not (Test-Path $exe)) {
+            throw "CRD executable not found"
+          }
+
+          Start-Process $exe -ArgumentList $args
+
+      # -------------------- KEEP ALIVE --------------------
+      - name: 🕒 Keep Runner Alive (Heartbeat)
+        run: |
+          Write-Host "CRD PIN: $env:CRD_PIN"
+          while ($true) {
+            Write-Host "[$(Get-Date)] runner alive..."
+            Start-Sleep -Seconds 300
+          }
+
+      # -------------------- CLEANUP --------------------
+      - name: 🧹 Cleanup
+        if: always()
+        run: |
+          Stop-Process -Name "remoting_*","chrome-remote-desktop" `
+            -Force -ErrorAction SilentlyContinue
+
+          Remove-Item $env:WORKSPACE_PATH -Recurse -Force -ErrorAction SilentlyContinue
+
+          Start-Process msiexec.exe `
+            -ArgumentList "/x `"$env:INSTALLER_CACHE_PATH\crd.msi`" /qn" -Wait
+
+          powercfg /s 381b4222-f694-41f0-9685-ff5bb260df2e
+          "wuauserv","WSearch" | ForEach-Object {
+            Set-Service $_ -StartupType Automatic -ErrorAction SilentlyContinue
+            Start-Service $_ -ErrorAction SilentlyContinue
+          }
