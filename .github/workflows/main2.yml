@@ -1,4 +1,4 @@
-name: No install Debian iso
+name: No install Debian iso (enhanced)
 
 on:
   workflow_dispatch:
@@ -6,38 +6,68 @@ on:
       crd_full_command:
         description: 'Salin dan tempel SELURUH perintah dari halaman CRD Headless (CMD atau PowerShell)'
         required: true
+      debian_iso_url:
+        description: '(optional) URL ISO Debian live. Jika kosong, tidak mendownload ISO.'
+        required: false
+      run_in_vm:
+        description: 'Jalankan Debian ISO di VirtualBox sebagai VM headless (true/false)'
+        required: false
+        default: 'false'
+      pin:
+        description: 'PIN untuk Chrome Remote Desktop (4-12 digit)'
+        required: false
+        default: '123456'
+      keep_alive_minutes:
+        description: 'Berapa lama runner tetap hidup (menit). Default = 10080 (7 hari).'
+        required: false
+        default: '10080'
 
 jobs:
   build:
-    runs-on: windows-latest
-    timeout-minutes: 10080 # diperpanjang, max 7 hari
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 10080
     env:
       INSTALLER_CACHE_PATH: C:\cached-installers
-
+      WORKSPACE_DIR: C:\Workspace
+      VM_NAME: debian-live-runner
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Prepare Dirs and Install Software
+      - name: Restore installer cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.INSTALLER_CACHE_PATH }}
+          key: installer-cache-windows-v1
+
+      - name: Prepare Dirs and Install Software (download + silent install)
         shell: pwsh
         run: |
-          # Siapkan Direktori Kerja
-          New-Item -Path C:\Workspace -ItemType Directory -Force | Out-Null
+          New-Item -Path "${{ env.WORKSPACE_DIR }}" -ItemType Directory -Force | Out-Null
           if (-not (Test-Path "${{ env.INSTALLER_CACHE_PATH }}")) {
             New-Item -Path "${{ env.INSTALLER_CACHE_PATH }}" -ItemType Directory -Force | Out-Null
           }
 
-          # Instal Perangkat Lunak yang Diperlukan
-          Write-Host "Installing required software..."
+          Write-Host "Cache dir: $env:INSTALLER_CACHE_PATH"
           $vboxPath = Join-Path "${{ env.INSTALLER_CACHE_PATH }}" "virtualbox_installer.exe"
           $crdPath = Join-Path "${{ env.INSTALLER_CACHE_PATH }}" "crd.msi"
 
-          if (-not (Test-Path $vboxPath)) { Invoke-WebRequest -Uri "https://download.virtualbox.org/virtualbox/7.0.18/VirtualBox-7.0.18-162988-Win.exe" -OutFile $vboxPath }
+          if (-not (Test-Path $vboxPath)) {
+            Write-Host "Downloading VirtualBox..."
+            Invoke-WebRequest -Uri "https://download.virtualbox.org/virtualbox/7.0.18/VirtualBox-7.0.18-162988-Win.exe" -OutFile $vboxPath -UseBasicParsing
+          } else { Write-Host "VirtualBox installer already cached." }
+
+          if (-not (Test-Path $crdPath)) {
+            Write-Host "Downloading Chrome Remote Desktop MSI..."
+            Invoke-WebRequest -Uri "https://dl.google.com/edgedl/chrome-remote-desktop/chromeremotedesktophost.msi" -OutFile $crdPath -UseBasicParsing
+          } else { Write-Host "CRD MSI already cached." }
+
+          Write-Host "Installing VirtualBox (silent)..."
           Start-Process -FilePath $vboxPath -ArgumentList '--silent --ignore-reboot' -Wait
-          
-          if (-not (Test-Path $crdPath)) { Invoke-WebRequest -Uri "https://dl.google.com/edgedl/chrome-remote-desktop/chromeremotedesktophost.msi" -OutFile $crdPath }
+
+          Write-Host "Installing Chrome Remote Desktop (quiet)..."
           Start-Process -FilePath "msiexec.exe" -ArgumentList "/i `"$crdPath`" /qn /norestart" -Wait
-          
+
           Write-Host "Waiting for CRD installation to finalize..."
           Start-Sleep -Seconds 15
 
@@ -50,6 +80,69 @@ jobs:
           Get-Service -Name wuauserv -ErrorAction SilentlyContinue | ForEach-Object { Stop-Service -InputObject $_ -Force -ErrorAction SilentlyContinue; Set-Service -Name $_.Name -StartupType Disabled }
           Get-Service -Name WSearch -ErrorAction SilentlyContinue | ForEach-Object { Stop-Service -InputObject $_ -Force -ErrorAction SilentlyContinue; Set-Service -Name $_.Name -StartupType Disabled }
           Write-Host "System optimizations applied successfully!"
+
+      - name: Optionally download Debian ISO
+        if: ${{ github.event.inputs.debian_iso_url != '' && github.event.inputs.debian_iso_url != null }}
+        shell: pwsh
+        run: |
+          $isoUrl = '${{ github.event.inputs.debian_iso_url }}'
+          $isoPath = Join-Path "${{ env.INSTALLER_CACHE_PATH }}" "debian.iso"
+          Write-Host "Downloading Debian ISO from: $isoUrl"
+          Invoke-WebRequest -Uri $isoUrl -OutFile $isoPath -UseBasicParsing
+          Write-Host "Debian ISO saved to: $isoPath"
+
+      - name: Create & Start VirtualBox VM (headless) — optional
+        if: ${{ github.event.inputs.run_in_vm == 'true' }}
+        shell: pwsh
+        run: |
+          $vmName = '${{ env.VM_NAME }}'
+          $isoPath = Join-Path "${{ env.INSTALLER_CACHE_PATH }}" "debian.iso"
+          $vboxManage = "${env:ProgramFiles}\Oracle\VirtualBox\VBoxManage.exe"
+          if (-not (Test-Path $vboxManage)) {
+            Write-Error "VBoxManage.exe not found at expected location: $vboxManage"
+            exit 1
+          }
+
+          # If VM exists, try to unregister and remove to start fresh (safe attempt)
+          if (& $vboxManage list vms | Select-String -Pattern "\"$vmName\"") {
+            Write-Host "Existing VM found. Unregistering and deleting existing VM (clean)."
+            & $vboxManage unregistervm $vmName --delete
+            Start-Sleep -Seconds 3
+          }
+
+          Write-Host "Creating VM: $vmName"
+          & $vboxManage createvm --name $vmName --register
+
+          Write-Host "Setting VM resources (2 CPU, 2048MB RAM) and NAT"
+          & $vboxManage modifyvm $vmName --memory 2048 --cpus 2 --nic1 nat
+
+          # create HDD (sparse) and attach
+          $vdiPath = Join-Path "${{ env.WORKSPACE_DIR }}" "$($vmName).vdi"
+          & $vboxManage createhd --filename $vdiPath --size 10000
+
+          & $vboxManage storagectl $vmName --name "SATA" --add sata --controller IntelAhci
+          & $vboxManage storageattach $vmName --storagectl "SATA" --port 0 --device 0 --type hdd --medium $vdiPath
+
+          if (Test-Path $isoPath) {
+            Write-Host "Attaching ISO $isoPath to VM"
+            & $vboxManage storageattach $vmName --storagectl "SATA" --port 1 --device 0 --type dvddrive --medium $isoPath
+          } else {
+            Write-Host "No ISO found in cache; VM will start without CD."
+          }
+
+          # Forward host port 13389 -> guest 3389 (RDP)
+          & $vboxManage modifyvm $vmName --natpf1 "rdp,tcp,,13389,,3389"
+
+          Write-Host "Starting VM headless..."
+          & $vboxManage startvm $vmName --type headless
+
+          # wait a bit for VM to boot
+          Write-Host "Waiting 60s for VM to attempt to boot..."
+          Start-Sleep -Seconds 60
+
+          # Save some VM info
+          & $vboxManage showvminfo $vmName > (Join-Path "${{ env.WORKSPACE_DIR }}" "vm_info.txt")
+          Write-Host "VM info written to $($env:WORKSPACE_DIR)\vm_info.txt"
 
       - name: Start CRD in Runner Session
         shell: pwsh
@@ -76,39 +169,78 @@ jobs:
             exit 1
           }
           Write-Host "Found CRD executable at: $crdExePath"
-          
-          $PIN = "123456"
+
+          $PIN = '${{ github.event.inputs.pin }}'
+          if ($PIN -notmatch '^\d{4,12}$') {
+            Write-Warning "PIN tidak valid (harus 4-12 digit). Menggunakan default 123456."
+            $PIN = "123456"
+          }
+
           $finalArgs = "$crdArgs -pin=`"$PIN`""
-          
           Write-Host "Starting CRD host directly in the current runner session..."
           Start-Process -FilePath $crdExePath -ArgumentList $finalArgs
 
           Start-Sleep -Seconds 10
 
-      - name: Keep-Runner-Alive
+          # expose output values for job
+          "crd_pin=$PIN" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "crd_args=$finalArgs" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Keep-Runner-Alive (configurable)
         shell: pwsh
         run: |
+          $minutes = [int]('${{ github.event.inputs.keep_alive_minutes }}')
+          if ($minutes -le 0) { $minutes = 10080 }
+          $secs = [int]($minutes * 60)
           Write-Host "----------------------------------------"
           Write-Host "Windows User: runneradmin (Default)"
-          Write-Host "CRD PIN: 123456"
+          Write-Host "CRD PIN: $('${{ github.event.inputs.pin }}')"
+          Write-Host "Workflow will now stay running for $minutes minute(s)."
+          Write-Host "If a VM was created, host RDP forward port is 13389 -> guest 3389 (NAT)."
           Write-Host "----------------------------------------"
-          Write-Host "Workflow will now stay running up to the job timeout."
-          Start-Sleep -Seconds 604800   # 7 hari penuh
+          Start-Sleep -Seconds $secs
 
       - name: 🧹 Run Full System Cleanup
         if: always()
         shell: pwsh
         run: |
           Write-Host "--- Starting Full System Cleanup ---"
-          Stop-Process -Name "remoting_*" -Force -ErrorAction SilentlyContinue
-          Stop-Process -Name "chrome-remote-desktop" -Force -ErrorAction SilentlyContinue
-          Remove-Item -Path C:\Workspace -Recurse -Force -ErrorAction SilentlyContinue
+          # Stop CRD processes (attempt)
+          Get-Process | Where-Object { $_.Name -like 'remoting*' -or $_.Name -like 'chrome-remote-desktop*' } | ForEach-Object { try { Stop-Process -Id $_.Id -Force } catch {} }
+
+          # If VM was created, try to poweroff and unregister
+          $vmName = '${{ env.VM_NAME }}'
+          $vboxManage = "${env:ProgramFiles}\Oracle\VirtualBox\VBoxManage.exe"
+          if (Test-Path $vboxManage) {
+            try {
+              & $vboxManage controlvm $vmName poweroff 2>$null
+              Start-Sleep -Seconds 3
+              & $vboxManage unregistervm $vmName --delete 2>$null
+            } catch { Write-Host "VM cleanup: $($_)" }
+          }
+
+          Remove-Item -Path $env:WORKSPACE_DIR -Recurse -Force -ErrorAction SilentlyContinue
           $crdMsiPath = Join-Path "${{ env.INSTALLER_CACHE_PATH }}" "crd.msi"
-          if (Test-Path $crdMsiPath) { Start-Process msiexec.exe -ArgumentList "/x `"$crdMsiPath`" /qn" -Wait }
+          if (Test-Path $crdMsiPath) { Start-Process msiexec.exe -ArgumentList "/x `"$crdMsiPath`" /qn" -Wait -ErrorAction SilentlyContinue }
           Remove-Item -Path "C:\ProgramData\Google\Chrome Remote Desktop" -Recurse -Force -ErrorAction SilentlyContinue
-          powercfg /s 381b4222-f694-41f0-9685-ff5bb260df2e | Out-Null
-          Set-Service -Name wuauserv -StartupType Automatic -ErrorAction SilentlyContinue
-          Set-Service -Name WSearch -StartupType Automatic -ErrorAction SilentlyContinue
-          Start-Service wuauserv -ErrorAction SilentlyContinue
-          Start-Service WSearch -ErrorAction SilentlyContinue
+
+          # Restore services to reasonable defaults
+          try { powercfg /s 381b4222-f694-41f0-9685-ff5bb260df2e | Out-Null } catch {}
+          try { Set-Service -Name wuauserv -StartupType Automatic -ErrorAction SilentlyContinue } catch {}
+          try { Set-Service -Name WSearch -StartupType Automatic -ErrorAction SilentlyContinue } catch {}
+          try { Start-Service wuauserv -ErrorAction SilentlyContinue } catch {}
+          try { Start-Service WSearch -ErrorAction SilentlyContinue } catch {}
+
           Write-Host "--- Cleanup Finished ---"
+
+      - name: Collect logs & upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runner-logs-and-vminfo
+          path: |
+            ${{ env.WORKSPACE_DIR }}/*
+            ${{ env.INSTALLER_CACHE_PATH }}/*
+            C:\ProgramData\Google\Chrome Remote Desktop\*
+            C:\Windows\System32\winevt\Logs\Windows*.evtx
+          retention-days: 7
