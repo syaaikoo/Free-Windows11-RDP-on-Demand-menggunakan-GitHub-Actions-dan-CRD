@@ -1,4 +1,4 @@
-name: No install Debian iso (enhanced)
+name: Windows 11 + Google Antigravity
 
 on:
   workflow_dispatch:
