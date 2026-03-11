@@ -1,0 +1,415 @@
+name: No install Debian iso (enhanced)
+
+on:
+  workflow_dispatch:
+    inputs:
+      crd_full_command:
+        description: 'Salin dan tempel SELURUH perintah dari halaman CRD Headless (CMD atau PowerShell)'
+        required: true
+      debian_iso_url:
+        description: '(optional) URL ISO Debian live. Jika kosong, tidak mendownload ISO.'
+        required: false
+      run_in_vm:
+        description: 'Jalankan Debian ISO di VirtualBox sebagai VM headless (true/false)'
+        required: false
+        default: 'false'
+      pin:
+        description: 'PIN untuk Chrome Remote Desktop (4-12 digit)'
+        required: false
+        default: '123456'
+      keep_alive_minutes:
+        description: 'Berapa lama runner tetap hidup (menit). Default = 10080 (7 hari).'
+        required: false
+        default: '10080'
+
+jobs:
+  build:
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 10080
+    env:
+      INSTALLER_CACHE_PATH: C:\cached-installers
+      WORKSPACE_DIR: C:\Workspace
+      VM_NAME: debian-live-runner
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Restore installer cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.INSTALLER_CACHE_PATH }}
+          key: installer-cache-windows-v1
+
+      - name: Prepare Dirs and Install Software (download + silent install)
+        shell: pwsh
+        run: |
+          New-Item -Path "${{ env.WORKSPACE_DIR }}" -ItemType Directory -Force | Out-Null
+          if (-not (Test-Path "${{ env.INSTALLER_CACHE_PATH }}")) {
+            New-Item -Path "${{ env.INSTALLER_CACHE_PATH }}" -ItemType Directory -Force | Out-Null
+          }
+
+          Write-Host "Cache dir: $env:INSTALLER_CACHE_PATH"
+          $vboxPath = Join-Path "${{ env.INSTALLER_CACHE_PATH }}" "virtualbox_installer.exe"
+          $crdPath = Join-Path "${{ env.INSTALLER_CACHE_PATH }}" "crd.msi"
+
+          if (-not (Test-Path $vboxPath)) {
+            Write-Host "Downloading VirtualBox..."
+            Invoke-WebRequest -Uri "https://download.virtualbox.org/virtualbox/7.0.18/VirtualBox-7.0.18-162988-Win.exe" -OutFile $vboxPath -UseBasicParsing
+          } else { Write-Host "VirtualBox installer already cached." }
+
+          if (-not (Test-Path $crdPath)) {
+            Write-Host "Downloading Chrome Remote Desktop MSI..."
+            Invoke-WebRequest -Uri "https://dl.google.com/edgedl/chrome-remote-desktop/chromeremotedesktophost.msi" -OutFile $crdPath -UseBasicParsing
+          } else { Write-Host "CRD MSI already cached." }
+
+          Write-Host "Installing VirtualBox (silent)..."
+          Start-Process -FilePath $vboxPath -ArgumentList '--silent --ignore-reboot' -Wait
+
+          Write-Host "Installing Chrome Remote Desktop (quiet)..."
+          Start-Process -FilePath "msiexec.exe" -ArgumentList "/i `"$crdPath`" /qn /norestart" -Wait
+
+          Write-Host "Waiting for CRD installation to finalize..."
+          Start-Sleep -Seconds 15
+
+      - name: Download & Install Antigravity (auto)
+        id: install_antigravity
+        shell: pwsh
+        run: |
+          # lokasi cache/installers
+          $cache = "${{ env.INSTALLER_CACHE_PATH }}"
+          New-Item -Path $cache -ItemType Directory -Force | Out-Null
+
+          $antigravityUrl = "https://edgedl.me.gvt1.com/edgedl/release2/j0qc3/antigravity/stable/1.20.5-5474622945755136/windows-x64/Antigravity.exe"
+          $antigravityExe = Join-Path $cache "Antigravity.exe"
+          
+          function Download-WithRetry {
+            param($url, $out, $retries=5)
+            for ($i=1; $i -le $retries; $i++) {
+              try {
+                Write-Host "Downloading (attempt $i): $url"
+                Start-BitsTransfer -Source $url -Destination $out -ErrorAction Stop
+                Write-Host "Downloaded to $out"
+                return $true
+              } catch {
+                Write-Warning "Attempt $i failed: $_"
+                Start-Sleep -Seconds (5 * $i)
+              }
+            }
+            throw "Download failed after $retries attempts: $url"
+          }
+
+          # download Antigravity
+          if (-not (Test-Path $antigravityExe)) {
+            Download-WithRetry -url $antigravityUrl -out $antigravityExe
+          } else { Write-Host "Antigravity installer already cached at $antigravityExe" }
+
+          # attempt to run common silent flags (best-effort)
+          $silentFlags = @(
+            '/S', '/silent', '/verysilent', '/quiet', '/install', '--silent', '--s', '/SILENT', '/VERYSILENT'
+          )
+
+          $installed = $false
+          foreach ($flag in $silentFlags) {
+            Write-Host "Trying silent install with flag: $flag"
+            try {
+              $p = Start-Process -FilePath $antigravityExe -ArgumentList $flag -Wait -PassThru -ErrorAction Stop
+              if ($p.ExitCode -eq 0) {
+                Write-Host "Antigravity installer returned exit code 0 with flag $flag"
+                $installed = $true
+                break
+              } else {
+                Write-Host "Flag $flag returned exit code $($p.ExitCode)."
+              }
+            } catch {
+              Write-Host "Flag $flag failed to launch the installer or returned error: $_"
+            }
+          }
+
+          # Fallback: if not 'installed' — copy exe to Program Files\Antigravity and register a simple launcher
+          if (-not $installed) {
+            $targetDir = Join-Path $env:ProgramFiles "Antigravity"
+            New-Item -Path $targetDir -ItemType Directory -Force | Out-Null
+            $targetExe = Join-Path $targetDir "Antigravity.exe"
+            Copy-Item -Path $antigravityExe -Destination $targetExe -Force
+            Write-Host "Copied Antigravity exe to $targetExe (manual launch may be required)"
+            # attempt to create a shortcut on Public Desktop (best-effort)
+            try {
+              $WshShell = New-Object -ComObject WScript.Shell
+              $shortcut = $WshShell.CreateShortcut("$env:Public\Desktop\Antigravity.lnk")
+              $shortcut.TargetPath = $targetExe
+              $shortcut.Save()
+              Write-Host "Created desktop shortcut for Antigravity."
+            } catch { Write-Warning "Could not create shortcut: $_" }
+            # expose fallback path
+            $finalPath = $targetExe
+          } else {
+            $finalPath = $antigravityExe
+          }
+
+          # expose path as output
+          "antigravity_path=$finalPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          Write-Host "Antigravity path output set: $finalPath"
+
+      - name: Ensure Google Chrome is installed (Enterprise MSI fallback)
+        id: ensure_chrome
+        shell: pwsh
+        run: |
+          # detect chrome in common Program Files path(s)
+          $chromePathCandidates = @(
+            "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe",
+            "${env:ProgramFiles}\Google\Chrome\Application\chrome.exe"
+          )
+          $chromePath = $null
+          foreach ($p in $chromePathCandidates) {
+            if (Test-Path $p) { $chromePath = $p; break }
+          }
+
+          if (-not $chromePath) {
+            Write-Host "Google Chrome not found. Attempting silent install (Enterprise MSI)..."
+            $msiUrl = "https://dl.google.com/chrome/install/GoogleChromeStandaloneEnterprise64.msi"
+            $msiPath = Join-Path "${{ env.INSTALLER_CACHE_PATH }}" "GoogleChromeStandaloneEnterprise64.msi"
+
+            function Download-IfMissing {
+              param($url,$out)
+              if (-not (Test-Path $out)) {
+                Start-BitsTransfer -Source $url -Destination $out -ErrorAction Stop
+              } else { Write-Host "$out already exists" }
+            }
+
+            try {
+              Download-IfMissing -url $msiUrl -out $msiPath
+              Write-Host "Installing Chrome (msiexec silent)..."
+              $exit = Start-Process -FilePath "msiexec.exe" -ArgumentList "/i `"$msiPath`" /qn /norestart" -Wait -PassThru -ErrorAction Stop
+              if ($exit.ExitCode -ne 0) { Write-Warning "Chrome MSI install returned code $($exit.ExitCode)" } else { Write-Host "Chrome installed." }
+            } catch {
+              Write-Warning "Chrome download/install failed: $_"
+            }
+
+            foreach ($p in $chromePathCandidates) {
+              if (Test-Path $p) { $chromePath = $p; break }
+            }
+          } else {
+            Write-Host "Chrome already present at $chromePath"
+          }
+
+          if (-not $chromePath) {
+            Write-Warning "Chrome not found/installed; chrome_path will be empty."
+            "chrome_path=" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          } else {
+            "chrome_path=$chromePath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+            Write-Host "Chrome path output set: $chromePath"
+          }
+
+      - name: Set Google Chrome as default browser (best-effort)
+        shell: pwsh
+        run: |
+          # Note: on modern Windows programmatic default-app assignment is restricted.
+          $chromePath = '${{ steps.ensure_chrome.outputs.chrome_path }}'
+          if (-not $chromePath) {
+            # fallback detect
+            $candidates = @(
+              "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe",
+              "${env:ProgramFiles}\Google\Chrome\Application\chrome.exe"
+            )
+            foreach ($p in $candidates) { if (Test-Path $p) { $chromePath = $p; break } }
+          }
+
+          if (Test-Path $chromePath) {
+            Write-Host "Attempting to make Chrome the default via Chrome's command-line flag (may prompt UI)..."
+            try {
+              Start-Process -FilePath $chromePath -ArgumentList "--make-default-browser" -WindowStyle Hidden -ErrorAction Stop
+              Start-Sleep -Seconds 6
+              Write-Host "Launched Chrome with --make-default-browser. Note: on modern Windows this may still require user confirmation or policy."
+            } catch {
+              Write-Warning "Could not launch Chrome with --make-default-browser: $_"
+            }
+
+            $guidance = @"
+NOTE: If you need an unattended, reliable way to set Chrome as default for many machines,
+use Group Policy / Default App Associations. See Google enterprise docs:
+https://support.google.com/chrome/a/answer/7009292
+"@
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $guidance
+          } else {
+            Write-Warning "Chrome executable not found; cannot attempt to set default."
+          }
+
+      - name: 🚀 Apply Performance Tweaks & Optimizations
+        shell: pwsh
+        run: |
+          Write-Host "Applying system optimizations for a smoother RDP experience..."
+          try { powercfg /s SCHEME_MIN } catch { Write-Warning "powercfg tweak failed: $_" }
+          try { Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects' -Name 'VisualFxSetting' -Value 2 -ErrorAction SilentlyContinue } catch {}
+          Get-Service -Name wuauserv -ErrorAction SilentlyContinue | ForEach-Object { Stop-Service -InputObject $_ -Force -ErrorAction SilentlyContinue; Set-Service -Name $_.Name -StartupType Disabled }
+          Get-Service -Name WSearch -ErrorAction SilentlyContinue | ForEach-Object { Stop-Service -InputObject $_ -Force -ErrorAction SilentlyContinue; Set-Service -Name $_.Name -StartupType Disabled }
+          Write-Host "System optimizations applied successfully!"
+
+      - name: Optionally download Debian ISO
+        if: ${{ github.event.inputs.debian_iso_url != '' && github.event.inputs.debian_iso_url != null }}
+        shell: pwsh
+        run: |
+          $isoUrl = '${{ github.event.inputs.debian_iso_url }}'
+          $isoPath = Join-Path "${{ env.INSTALLER_CACHE_PATH }}" "debian.iso"
+          Write-Host "Downloading Debian ISO from: $isoUrl"
+          Invoke-WebRequest -Uri $isoUrl -OutFile $isoPath -UseBasicParsing
+          Write-Host "Debian ISO saved to: $isoPath"
+
+      - name: Create & Start VirtualBox VM (headless) — optional
+        if: ${{ github.event.inputs.run_in_vm == 'true' }}
+        shell: pwsh
+        run: |
+          $vmName = '${{ env.VM_NAME }}'
+          $isoPath = Join-Path "${{ env.INSTALLER_CACHE_PATH }}" "debian.iso"
+          $vboxManage = "${env:ProgramFiles}\Oracle\VirtualBox\VBoxManage.exe"
+          if (-not (Test-Path $vboxManage)) {
+            Write-Error "VBoxManage.exe not found at expected location: $vboxManage"
+            exit 1
+          }
+
+          # If VM exists, try to unregister and remove to start fresh (safe attempt)
+          if (& $vboxManage list vms | Select-String -Pattern "\"$vmName\"") {
+            Write-Host "Existing VM found. Unregistering and deleting existing VM (clean)."
+            & $vboxManage unregistervm $vmName --delete
+            Start-Sleep -Seconds 3
+          }
+
+          Write-Host "Creating VM: $vmName"
+          & $vboxManage createvm --name $vmName --register
+
+          Write-Host "Setting VM resources (2 CPU, 2048MB RAM) and NAT"
+          & $vboxManage modifyvm $vmName --memory 2048 --cpus 2 --nic1 nat
+
+          # create HDD (sparse) and attach
+          $vdiPath = Join-Path "${{ env.WORKSPACE_DIR }}" "$($vmName).vdi"
+          & $vboxManage createhd --filename $vdiPath --size 10000
+
+          & $vboxManage storagectl $vmName --name "SATA" --add sata --controller IntelAhci
+          & $vboxManage storageattach $vmName --storagectl "SATA" --port 0 --device 0 --type hdd --medium $vdiPath
+
+          if (Test-Path $isoPath) {
+            Write-Host "Attaching ISO $isoPath to VM"
+            & $vboxManage storageattach $vmName --storagectl "SATA" --port 1 --device 0 --type dvddrive --medium $isoPath
+          } else {
+            Write-Host "No ISO found in cache; VM will start without CD."
+          }
+
+          # Forward host port 13389 -> guest 3389 (RDP)
+          & $vboxManage modifyvm $vmName --natpf1 "rdp,tcp,,13389,,3389"
+
+          Write-Host "Starting VM headless..."
+          & $vboxManage startvm $vmName --type headless
+
+          # wait a bit for VM to boot
+          Write-Host "Waiting 60s for VM to attempt to boot..."
+          Start-Sleep -Seconds 60
+
+          # Save some VM info
+          & $vboxManage showvminfo $vmName > (Join-Path "${{ env.WORKSPACE_DIR }}" "vm_info.txt")
+          Write-Host "VM info written to $($env:WORKSPACE_DIR)\vm_info.txt"
+
+      - name: Start CRD in Runner Session
+        shell: pwsh
+        run: |
+          $FullCommand = '${{ github.event.inputs.crd_full_command }}'
+          $ArgsPattern = '\s+--code.+'
+          if ($FullCommand -match $ArgsPattern) { $crdArgs = $matches[0].Trim() }
+          else { Write-Error "Could not extract arguments from input."; exit 1 }
+
+          $searchPaths = @( "C:\Program Files\Google", "C:\Program Files (x86)\Google" )
+          $crdExePath = $null
+          foreach ($path in $searchPaths) {
+              if (Test-Path $path) {
+                  $foundFile = Get-ChildItem -Path $path -Filter "remoting_start_host.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+                  if ($null -ne $foundFile) {
+                      $crdExePath = $foundFile.FullName
+                      break
+                  }
+              }
+          }
+
+          if (-not $crdExePath) {
+            Write-Error "FATAL: remoting_start_host.exe not found after installation."
+            exit 1
+          }
+          Write-Host "Found CRD executable at: $crdExePath"
+
+          $PIN = '${{ github.event.inputs.pin }}'
+          if ($PIN -notmatch '^\d{4,12}$') {
+            Write-Warning "PIN tidak valid (harus 4-12 digit). Menggunakan default 123456."
+            $PIN = "123456"
+          }
+
+          $finalArgs = "$crdArgs -pin=`"$PIN`""
+          Write-Host "Starting CRD host directly in the current runner session..."
+          Start-Process -FilePath $crdExePath -ArgumentList $finalArgs
+
+          Start-Sleep -Seconds 10
+
+          # expose output values for job
+          "crd_pin=$PIN" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "crd_args=$finalArgs" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Keep-Runner-Alive (configurable)
+        shell: pwsh
+        run: |
+          $minutes = [int]('${{ github.event.inputs.keep_alive_minutes }}')
+          if ($minutes -le 0) { $minutes = 10080 }
+          $secs = [int]($minutes * 60)
+          Write-Host "----------------------------------------"
+          Write-Host "Windows User: runneradmin (Default)"
+          Write-Host "CRD PIN: $('${{ github.event.inputs.pin }}')"
+          Write-Host "Workflow will now stay running for $minutes minute(s)."
+          Write-Host "If a VM was created, host RDP forward port is 13389 -> guest 3389 (NAT)."
+          Write-Host "----------------------------------------"
+          Start-Sleep -Seconds $secs
+
+      - name: 🧹 Run Full System Cleanup
+        if: always()
+        shell: pwsh
+        run: |
+          Write-Host "--- Starting Full System Cleanup ---"
+          # Stop CRD processes (attempt)
+          Get-Process | Where-Object { $_.Name -like 'remoting*' -or $_.Name -like 'chrome-remote-desktop*' } | ForEach-Object { try { Stop-Process -Id $_.Id -Force } catch {} }
+
+          # If VM was created, try to poweroff and unregister
+          $vmName = '${{ env.VM_NAME }}'
+          $vboxManage = "${env:ProgramFiles}\Oracle\VirtualBox\VBoxManage.exe"
+          if (Test-Path $vboxManage) {
+            try {
+              & $vboxManage controlvm $vmName poweroff 2>$null
+              Start-Sleep -Seconds 3
+              & $vboxManage unregistervm $vmName --delete 2>$null
+            } catch { Write-Host "VM cleanup: $($_)" }
+          }
+
+          Remove-Item -Path $env:WORKSPACE_DIR -Recurse -Force -ErrorAction SilentlyContinue
+          $crdMsiPath = Join-Path "${{ env.INSTALLER_CACHE_PATH }}" "crd.msi"
+          if (Test-Path $crdMsiPath) { Start-Process msiexec.exe -ArgumentList "/x `"$crdMsiPath`" /qn" -Wait -ErrorAction SilentlyContinue }
+          Remove-Item -Path "C:\ProgramData\Google\Chrome Remote Desktop" -Recurse -Force -ErrorAction SilentlyContinue
+
+          # remove Antigravity fallback copy if present
+          $antigravityFallback = Join-Path $env:ProgramFiles "Antigravity"
+          if (Test-Path $antigravityFallback) {
+            try { Remove-Item -Path $antigravityFallback -Recurse -Force -ErrorAction SilentlyContinue } catch {}
+          }
+
+          # Restore services to reasonable defaults
+          try { powercfg /s 381b4222-f694-41f0-9685-ff5bb260df2e | Out-Null } catch {}
+          try { Set-Service -Name wuauserv -StartupType Automatic -ErrorAction SilentlyContinue } catch {}
+          try { Set-Service -Name WSearch -StartupType Automatic -ErrorAction SilentlyContinue } catch {}
+          try { Start-Service wuauserv -ErrorAction SilentlyContinue } catch {}
+          try { Start-Service WSearch -ErrorAction SilentlyContinue } catch {}
+
+          Write-Host "--- Cleanup Finished ---"
+
+      - name: Collect logs & upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runner-logs-and-vminfo
+          path: |
+            ${{ env.WORKSPACE_DIR }}/*
+            ${{ env.INSTALLER_CACHE_PATH }}/*
+            C:\ProgramData\Google\Chrome Remote Desktop\*
+            C:\Windows\System32\winevt\Logs\Windows*.evtx
+          retention-days: 7
