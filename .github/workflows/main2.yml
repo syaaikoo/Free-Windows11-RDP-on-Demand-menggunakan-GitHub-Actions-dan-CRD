@@ -51,6 +51,8 @@ jobs:
           Write-Host "Cache dir: $env:INSTALLER_CACHE_PATH"
           $vboxPath = Join-Path "${{ env.INSTALLER_CACHE_PATH }}" "virtualbox_installer.exe"
           $crdPath = Join-Path "${{ env.INSTALLER_CACHE_PATH }}" "crd.msi"
+          $antigravityPath = Join-Path "${{ env.INSTALLER_CACHE_PATH }}" "Antigravity.exe"
+          $antigravityUrl = "https://edgedl.me.gvt1.com/edgedl/release2/j0qc3/antigravity/stable/1.20.5-5474622945755136/windows-x64/Antigravity.exe"
 
           if (-not (Test-Path $vboxPath)) {
             Write-Host "Downloading VirtualBox..."
@@ -62,6 +64,19 @@ jobs:
             Invoke-WebRequest -Uri "https://dl.google.com/edgedl/chrome-remote-desktop/chromeremotedesktophost.msi" -OutFile $crdPath -UseBasicParsing
           } else { Write-Host "CRD MSI already cached." }
 
+          # --- NEW: download & cache Antigravity installer ---
+          if (-not (Test-Path $antigravityPath)) {
+            Write-Host "Downloading Antigravity installer..."
+            try {
+              Invoke-WebRequest -Uri $antigravityUrl -OutFile $antigravityPath -UseBasicParsing -TimeoutSec 300
+              Write-Host "Antigravity downloaded to: $antigravityPath"
+            } catch {
+              Write-Warning "Failed to download Antigravity installer: $_"
+            }
+          } else {
+            Write-Host "Antigravity installer already cached."
+          }
+
           Write-Host "Installing VirtualBox (silent)..."
           Start-Process -FilePath $vboxPath -ArgumentList '--silent --ignore-reboot' -Wait
 
@@ -70,6 +85,41 @@ jobs:
 
           Write-Host "Waiting for CRD installation to finalize..."
           Start-Sleep -Seconds 15
+
+          # --- NEW: Attempt silent install of Antigravity with several common flags ---
+          if (Test-Path $antigravityPath) {
+            Write-Host "Installing Antigravity (attempting silent modes)..."
+            $installArgsCandidates = @("/S", "/silent", "/verysilent", "--silent", "/quiet", "/qn")
+            $installed = $false
+
+            foreach ($arg in $installArgsCandidates) {
+              try {
+                Write-Host "Trying installer with arg: $arg"
+                $proc = Start-Process -FilePath $antigravityPath -ArgumentList $arg -Wait -PassThru -ErrorAction Stop
+                # If ExitCode is 0, assume success
+                if ($proc.ExitCode -eq 0) {
+                  Write-Host "Antigravity installer succeeded with arg: $arg (ExitCode 0)."
+                  $installed = $true
+                  break
+                } else {
+                  Write-Warning "Antigravity installer exited with code $($proc.ExitCode) for arg: $arg"
+                }
+              } catch {
+                Write-Warning "Antigravity install attempt with arg $arg failed: $_"
+              }
+            }
+
+            if (-not $installed) {
+              Write-Warning "Silent install attempts failed or not supported. Launching Antigravity installer without args (interactive fallback)."
+              try {
+                Start-Process -FilePath $antigravityPath -Wait
+              } catch {
+                Write-Warning "Failed to run Antigravity installer interactively: $_"
+              }
+            }
+          } else {
+            Write-Warning "Antigravity installer not present in cache; skipping install."
+          }
 
       - name: 🚀 Apply Performance Tweaks & Optimizations
         shell: pwsh
