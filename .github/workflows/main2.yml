@@ -1,4 +1,4 @@
-name: Windows 11 + Google Antigravity
+name: No install Debian iso (enhanced)
 
 on:
   workflow_dispatch:
@@ -45,81 +45,44 @@ jobs:
         run: |
           New-Item -Path "${{ env.WORKSPACE_DIR }}" -ItemType Directory -Force | Out-Null
           if (-not (Test-Path "${{ env.INSTALLER_CACHE_PATH }}")) {
-            New-Item -Path "${{ env.INSTALLER_CACHE_PATH }}" -ItemType Directory -Force | Out-Null
+              New-Item -Path "${{ env.INSTALLER_CACHE_PATH }}" -ItemType Directory -Force | Out-Null
           }
-
           Write-Host "Cache dir: $env:INSTALLER_CACHE_PATH"
+          
           $vboxPath = Join-Path "${{ env.INSTALLER_CACHE_PATH }}" "virtualbox_installer.exe"
           $crdPath = Join-Path "${{ env.INSTALLER_CACHE_PATH }}" "crd.msi"
           $antigravityPath = Join-Path "${{ env.INSTALLER_CACHE_PATH }}" "Antigravity.exe"
-          $antigravityUrl = "https://edgedl.me.gvt1.com/edgedl/release2/j0qc3/antigravity/stable/1.20.5-5474622945755136/windows-x64/Antigravity.exe"
-
+          
           if (-not (Test-Path $vboxPath)) {
-            Write-Host "Downloading VirtualBox..."
-            Invoke-WebRequest -Uri "https://download.virtualbox.org/virtualbox/7.0.18/VirtualBox-7.0.18-162988-Win.exe" -OutFile $vboxPath -UseBasicParsing
+              Write-Host "Downloading VirtualBox..."
+              Invoke-WebRequest -Uri "https://download.virtualbox.org/virtualbox/7.0.18/VirtualBox-7.0.18-162988-Win.exe" -OutFile $vboxPath -UseBasicParsing
           } else { Write-Host "VirtualBox installer already cached." }
-
+          
           if (-not (Test-Path $crdPath)) {
-            Write-Host "Downloading Chrome Remote Desktop MSI..."
-            Invoke-WebRequest -Uri "https://dl.google.com/edgedl/chrome-remote-desktop/chromeremotedesktophost.msi" -OutFile $crdPath -UseBasicParsing
+              Write-Host "Downloading Chrome Remote Desktop MSI..."
+              Invoke-WebRequest -Uri "https://dl.google.com/edgedl/chrome-remote-desktop/chromeremotedesktophost.msi" -OutFile $crdPath -UseBasicParsing
           } else { Write-Host "CRD MSI already cached." }
 
-          # --- NEW: download & cache Antigravity installer ---
+          # --- BAGIAN TAMBAHAN UNTUK GOOGLE ANTIGRAVITY ---
           if (-not (Test-Path $antigravityPath)) {
-            Write-Host "Downloading Antigravity installer..."
-            try {
-              Invoke-WebRequest -Uri $antigravityUrl -OutFile $antigravityPath -UseBasicParsing -TimeoutSec 300
-              Write-Host "Antigravity downloaded to: $antigravityPath"
-            } catch {
-              Write-Warning "Failed to download Antigravity installer: $_"
-            }
-          } else {
-            Write-Host "Antigravity installer already cached."
-          }
-
+              Write-Host "Downloading Google Antigravity..."
+              Invoke-WebRequest -Uri "https://edgedl.me.gvt1.com/edgedl/release2/j0qc3/antigravity/stable/1.20.5-5474622945755136/windows-x64/Antigravity.exe" -OutFile $antigravityPath -UseBasicParsing
+          } else { Write-Host "Google Antigravity already cached." }
+          # ------------------------------------------------
+          
           Write-Host "Installing VirtualBox (silent)..."
           Start-Process -FilePath $vboxPath -ArgumentList '--silent --ignore-reboot' -Wait
-
+          
           Write-Host "Installing Chrome Remote Desktop (quiet)..."
           Start-Process -FilePath "msiexec.exe" -ArgumentList "/i `"$crdPath`" /qn /norestart" -Wait
+          
+          # --- INSTALASI GOOGLE ANTIGRAVITY ---
+          Write-Host "Installing Google Antigravity (silent)..."
+          Start-Process -FilePath $antigravityPath -ArgumentList '/silent' -Wait
+          # ------------------------------------
 
-          Write-Host "Waiting for CRD installation to finalize..."
+          Write-Host "Waiting for installations to finalize..."
           Start-Sleep -Seconds 15
-
-          # --- NEW: Attempt silent install of Antigravity with several common flags ---
-          if (Test-Path $antigravityPath) {
-            Write-Host "Installing Antigravity (attempting silent modes)..."
-            $installArgsCandidates = @("/S", "/silent", "/verysilent", "--silent", "/quiet", "/qn")
-            $installed = $false
-
-            foreach ($arg in $installArgsCandidates) {
-              try {
-                Write-Host "Trying installer with arg: $arg"
-                $proc = Start-Process -FilePath $antigravityPath -ArgumentList $arg -Wait -PassThru -ErrorAction Stop
-                # If ExitCode is 0, assume success
-                if ($proc.ExitCode -eq 0) {
-                  Write-Host "Antigravity installer succeeded with arg: $arg (ExitCode 0)."
-                  $installed = $true
-                  break
-                } else {
-                  Write-Warning "Antigravity installer exited with code $($proc.ExitCode) for arg: $arg"
-                }
-              } catch {
-                Write-Warning "Antigravity install attempt with arg $arg failed: $_"
-              }
-            }
-
-            if (-not $installed) {
-              Write-Warning "Silent install attempts failed or not supported. Launching Antigravity installer without args (interactive fallback)."
-              try {
-                Start-Process -FilePath $antigravityPath -Wait
-              } catch {
-                Write-Warning "Failed to run Antigravity installer interactively: $_"
-              }
-            }
-          } else {
-            Write-Warning "Antigravity installer not present in cache; skipping install."
-          }
 
       - name: 🚀 Apply Performance Tweaks & Optimizations
         shell: pwsh
@@ -149,48 +112,33 @@ jobs:
           $isoPath = Join-Path "${{ env.INSTALLER_CACHE_PATH }}" "debian.iso"
           $vboxManage = "${env:ProgramFiles}\Oracle\VirtualBox\VBoxManage.exe"
           if (-not (Test-Path $vboxManage)) {
-            Write-Error "VBoxManage.exe not found at expected location: $vboxManage"
-            exit 1
+              Write-Error "VBoxManage.exe not found at expected location: $vboxManage"
+              exit 1
           }
-
-          # If VM exists, try to unregister and remove to start fresh (safe attempt)
           if (& $vboxManage list vms | Select-String -Pattern "\"$vmName\"") {
-            Write-Host "Existing VM found. Unregistering and deleting existing VM (clean)."
-            & $vboxManage unregistervm $vmName --delete
-            Start-Sleep -Seconds 3
+              Write-Host "Existing VM found. Unregistering and deleting existing VM (clean)."
+              & $vboxManage unregistervm $vmName --delete
+              Start-Sleep -Seconds 3
           }
-
           Write-Host "Creating VM: $vmName"
           & $vboxManage createvm --name $vmName --register
-
           Write-Host "Setting VM resources (2 CPU, 2048MB RAM) and NAT"
           & $vboxManage modifyvm $vmName --memory 2048 --cpus 2 --nic1 nat
-
-          # create HDD (sparse) and attach
           $vdiPath = Join-Path "${{ env.WORKSPACE_DIR }}" "$($vmName).vdi"
           & $vboxManage createhd --filename $vdiPath --size 10000
-
           & $vboxManage storagectl $vmName --name "SATA" --add sata --controller IntelAhci
           & $vboxManage storageattach $vmName --storagectl "SATA" --port 0 --device 0 --type hdd --medium $vdiPath
-
           if (Test-Path $isoPath) {
-            Write-Host "Attaching ISO $isoPath to VM"
-            & $vboxManage storageattach $vmName --storagectl "SATA" --port 1 --device 0 --type dvddrive --medium $isoPath
+              Write-Host "Attaching ISO $isoPath to VM"
+              & $vboxManage storageattach $vmName --storagectl "SATA" --port 1 --device 0 --type dvddrive --medium $isoPath
           } else {
-            Write-Host "No ISO found in cache; VM will start without CD."
+              Write-Host "No ISO found in cache; VM will start without CD."
           }
-
-          # Forward host port 13389 -> guest 3389 (RDP)
           & $vboxManage modifyvm $vmName --natpf1 "rdp,tcp,,13389,,3389"
-
           Write-Host "Starting VM headless..."
           & $vboxManage startvm $vmName --type headless
-
-          # wait a bit for VM to boot
           Write-Host "Waiting 60s for VM to attempt to boot..."
           Start-Sleep -Seconds 60
-
-          # Save some VM info
           & $vboxManage showvminfo $vmName > (Join-Path "${{ env.WORKSPACE_DIR }}" "vm_info.txt")
           Write-Host "VM info written to $($env:WORKSPACE_DIR)\vm_info.txt"
 
@@ -199,10 +147,15 @@ jobs:
         run: |
           $FullCommand = '${{ github.event.inputs.crd_full_command }}'
           $ArgsPattern = '\s+--code.+'
-          if ($FullCommand -match $ArgsPattern) { $crdArgs = $matches[0].Trim() }
-          else { Write-Error "Could not extract arguments from input."; exit 1 }
-
-          $searchPaths = @( "C:\Program Files\Google", "C:\Program Files (x86)\Google" )
+          if ($FullCommand -match $ArgsPattern) {
+              $crdArgs = $matches[0].Trim()
+          } else {
+              Write-Error "Could not extract arguments from input."; exit 1
+          }
+          $searchPaths = @(
+              "C:\Program Files\Google",
+              "C:\Program Files (x86)\Google"
+          )
           $crdExePath = $null
           foreach ($path in $searchPaths) {
               if (Test-Path $path) {
@@ -213,26 +166,20 @@ jobs:
                   }
               }
           }
-
           if (-not $crdExePath) {
-            Write-Error "FATAL: remoting_start_host.exe not found after installation."
-            exit 1
+              Write-Error "FATAL: remoting_start_host.exe not found after installation."
+              exit 1
           }
           Write-Host "Found CRD executable at: $crdExePath"
-
           $PIN = '${{ github.event.inputs.pin }}'
           if ($PIN -notmatch '^\d{4,12}$') {
-            Write-Warning "PIN tidak valid (harus 4-12 digit). Menggunakan default 123456."
-            $PIN = "123456"
+              Write-Warning "PIN tidak valid (harus 4-12 digit). Menggunakan default 123456."
+              $PIN = "123456"
           }
-
           $finalArgs = "$crdArgs -pin=`"$PIN`""
           Write-Host "Starting CRD host directly in the current runner session..."
           Start-Process -FilePath $crdExePath -ArgumentList $finalArgs
-
           Start-Sleep -Seconds 10
-
-          # expose output values for job
           "crd_pin=$PIN" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           "crd_args=$finalArgs" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
@@ -255,32 +202,29 @@ jobs:
         shell: pwsh
         run: |
           Write-Host "--- Starting Full System Cleanup ---"
-          # Stop CRD processes (attempt)
-          Get-Process | Where-Object { $_.Name -like 'remoting*' -or $_.Name -like 'chrome-remote-desktop*' } | ForEach-Object { try { Stop-Process -Id $_.Id -Force } catch {} }
-
-          # If VM was created, try to poweroff and unregister
+          Get-Process | Where-Object { $_.Name -like 'remoting*' -or $_.Name -like 'chrome-remote-desktop*' } | ForEach-Object {
+              try { Stop-Process -Id $_.Id -Force } catch {}
+          }
           $vmName = '${{ env.VM_NAME }}'
           $vboxManage = "${env:ProgramFiles}\Oracle\VirtualBox\VBoxManage.exe"
           if (Test-Path $vboxManage) {
-            try {
-              & $vboxManage controlvm $vmName poweroff 2>$null
-              Start-Sleep -Seconds 3
-              & $vboxManage unregistervm $vmName --delete 2>$null
-            } catch { Write-Host "VM cleanup: $($_)" }
+              try {
+                  & $vboxManage controlvm $vmName poweroff 2>$null
+                  Start-Sleep -Seconds 3
+                  & $vboxManage unregistervm $vmName --delete 2>$null
+              } catch { Write-Host "VM cleanup: $($_)" }
           }
-
           Remove-Item -Path $env:WORKSPACE_DIR -Recurse -Force -ErrorAction SilentlyContinue
           $crdMsiPath = Join-Path "${{ env.INSTALLER_CACHE_PATH }}" "crd.msi"
-          if (Test-Path $crdMsiPath) { Start-Process msiexec.exe -ArgumentList "/x `"$crdMsiPath`" /qn" -Wait -ErrorAction SilentlyContinue }
+          if (Test-Path $crdMsiPath) {
+              Start-Process msiexec.exe -ArgumentList "/x `"$crdMsiPath`" /qn" -Wait -ErrorAction SilentlyContinue
+          }
           Remove-Item -Path "C:\ProgramData\Google\Chrome Remote Desktop" -Recurse -Force -ErrorAction SilentlyContinue
-
-          # Restore services to reasonable defaults
           try { powercfg /s 381b4222-f694-41f0-9685-ff5bb260df2e | Out-Null } catch {}
           try { Set-Service -Name wuauserv -StartupType Automatic -ErrorAction SilentlyContinue } catch {}
           try { Set-Service -Name WSearch -StartupType Automatic -ErrorAction SilentlyContinue } catch {}
           try { Start-Service wuauserv -ErrorAction SilentlyContinue } catch {}
           try { Start-Service WSearch -ErrorAction SilentlyContinue } catch {}
-
           Write-Host "--- Cleanup Finished ---"
 
       - name: Collect logs & upload artifacts
